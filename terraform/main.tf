@@ -14,6 +14,20 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 # -------------------------------------------------------
+# KMS KEY — encryption for ECR repository
+# -------------------------------------------------------
+resource "aws_kms_key" "ecr" {
+  description             = "${var.project_name} ECR encryption key"
+  deletion_window_in_days = 10
+  enable_key_rotation     = true
+}
+
+resource "aws_kms_alias" "ecr" {
+  name          = "alias/${var.project_name}-ecr"
+  target_key_id = aws_kms_key.ecr.key_id
+}
+
+# -------------------------------------------------------
 # ECR REPOSITORY — secure container registry
 # -------------------------------------------------------
 resource "aws_ecr_repository" "app" {
@@ -27,7 +41,8 @@ resource "aws_ecr_repository" "app" {
 
   # Enable encryption at rest
   encryption_configuration {
-    encryption_type = "AES256"
+    encryption_type = "KMS"
+    kms_key         = aws_kms_key.ecr.arn
   }
 
   tags = {
