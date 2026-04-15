@@ -1,0 +1,14 @@
+.terraform/
+*.tfstate
+*.tfstate.backup
+terraform.tfvars
+.terraform.lock.hcl
+*.pem
+*.key
+.env
+node_modules/
+trivy-results/
+zap-results/
+semgrep-results/
+snyk-results/
+*.sarif

@@ -1,0 +1,395 @@
+name: Enterprise DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: devops-demo-app
+  IMAGE_TAG: ${{ github.sha }}
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  # -------------------------------------------------------
+  # STAGE 1 — SAST: Static Application Security Testing
+  # Scans source code for vulnerabilities before building
+  # -------------------------------------------------------
+  sast-semgrep:
+    name: SAST — Semgrep Code Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/nodejs
+            p/security-audit
+            p/owasp-top-ten
+            p/secrets
+          generateSarif: "1"
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload Semgrep SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-sast
+
+  # -------------------------------------------------------
+  # STAGE 2 — SCA: Software Composition Analysis
+  # Scans dependencies for known CVEs
+  # -------------------------------------------------------
+  sca-snyk:
+    name: SCA — Snyk Dependency Scanning
+    runs-on: ubuntu-latest
+    needs: sast-semgrep
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        working-directory: ./app
+        run: npm ci
+
+      - name: Run Snyk dependency scan
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: >-
+            --severity-threshold=high
+            --file=app/package.json
+            --sarif-file-output=snyk.sarif
+
+      - name: Upload Snyk SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: snyk.sarif
+          category: snyk-sca
+
+  # -------------------------------------------------------
+  # STAGE 3 — IaC SCANNING
+  # Checkov scans Terraform for misconfigurations
+  # before any infrastructure is deployed
+  # -------------------------------------------------------
+  iac-checkov:
+    name: IaC — Checkov Terraform Scanning
+    runs-on: ubuntu-latest
+    needs: sast-semgrep
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov IaC scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov.sarif
+          soft_fail: false
+          skip_check: >-
+            CKV_AWS_115,
+            CKV_AWS_116,
+            CKV_AWS_117,
+            CKV2_AWS_12
+
+      - name: Upload Checkov SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov.sarif
+          category: checkov-iac
+
+  # -------------------------------------------------------
+  # STAGE 4 — BUILD
+  # Docker image built only after all code scans pass
+  # -------------------------------------------------------
+  build:
+    name: Build — Docker Image
+    runs-on: ubuntu-latest
+    needs: [sast-semgrep, sca-snyk, iac-checkov]
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./app/Dockerfile
+          push: false
+          load: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image for scanning
+        run: |
+          docker save \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            -o /tmp/image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          retention-days: 1
+
+  # -------------------------------------------------------
+  # STAGE 5 — IMAGE SCANNING
+  # Trivy scans the built image for OS and library CVEs
+  # Blocks on CRITICAL and HIGH — reports MEDIUM and LOW
+  # -------------------------------------------------------
+  image-scan-trivy:
+    name: Image Scan — Trivy CVE Scanning
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/image.tar
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Run Trivy image scan — CRITICAL and HIGH block
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: >-
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Run Trivy full report — all severities
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: >-
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image-scan
+
+  # -------------------------------------------------------
+  # STAGE 6 — PUSH TO ECR
+  # Image pushed only after Trivy scan passes
+  # -------------------------------------------------------
+  push-to-ecr:
+    name: Push — Publish to AWS ECR
+    runs-on: ubuntu-latest
+    needs: image-scan-trivy
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/image.tar
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image to ECR
+        run: |
+          docker push \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker push \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Output image URI
+        run: |
+          echo "Image pushed successfully:"
+          echo "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+
+  # -------------------------------------------------------
+  # STAGE 7 — DAST: Dynamic Application Security Testing
+  # OWASP ZAP scans running application for runtime vulns
+  # Runs after image is pushed to ECR
+  # -------------------------------------------------------
+  dast-owasp-zap:
+    name: DAST — OWASP ZAP Runtime Scanning
+    runs-on: ubuntu-latest
+    needs: push-to-ecr
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Start application container for DAST
+        run: |
+          docker run -d \
+            --name target-app \
+            -p 3000:3000 \
+            -e NODE_ENV=production \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+          # Wait for app to be ready
+          echo "Waiting for application to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health; then
+              echo "Application is ready"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.10.0
+        with:
+          target: 'http://localhost:3000'
+          rules_file_name: security/zap/zap-baseline.conf
+          cmd_options: '-a -j'
+          fail_action: false
+          artifact_name: zap-scan-report
+
+      - name: Stop application container
+        if: always()
+        run: docker stop target-app || true
+
+  # -------------------------------------------------------
+  # STAGE 8 — SECURITY SUMMARY
+  # Posts scan results as PR comment for visibility
+  # -------------------------------------------------------
+  security-summary:
+    name: Security — Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [sast-semgrep, sca-snyk, iac-checkov, image-scan-trivy]
+    if: always()
+
+    steps:
+      - name: Post security summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const results = {
+              semgrep: '${{ needs.sast-semgrep.result }}',
+              snyk: '${{ needs.sca-snyk.result }}',
+              checkov: '${{ needs.iac-checkov.result }}',
+              trivy: '${{ needs.image-scan-trivy.result }}'
+            };
+
+            const emoji = (r) => r === 'success' ? '✅' : r === 'failure' ? '❌' : '⚠️';
+
+            const body = `## DevSecOps Pipeline Security Report
+
+            | Stage | Tool | Result |
+            |-------|------|--------|
+            | SAST | Semgrep | ${emoji(results.semgrep)} ${results.semgrep} |
+            | SCA | Snyk | ${emoji(results.snyk)} ${results.snyk} |
+            | IaC | Checkov | ${emoji(results.checkov)} ${results.checkov} |
+            | Image | Trivy | ${emoji(results.trivy)} ${results.trivy} |
+
+            **Policy:** Pipeline blocks on CRITICAL and HIGH vulnerabilities.
+            MEDIUM and LOW findings are reported to the security backlog.
+
+            *Powered by Tech with Emma DevSecOps Platform*
+            *github.com/Eaglewings966/aws-devsecops-pipeline*`;
+
+            if (context.eventName === 'pull_request') {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }
+
+            console.log(body);

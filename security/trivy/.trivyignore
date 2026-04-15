@@ -1,0 +1,4 @@
+# Add CVE IDs here to ignore specific known vulnerabilities
+# that have been reviewed and accepted as low risk
+# Example:
+# CVE-2023-12345
