@@ -219,6 +219,7 @@ jobs:
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           format: sarif
           output: trivy-results.sarif
+          scanners: vuln
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
@@ -231,6 +232,7 @@ jobs:
           image-ref: >-
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           format: table
+          scanners: vuln
           severity: CRITICAL,HIGH,MEDIUM,LOW
           exit-code: '0'
           ignore-unfixed: true
