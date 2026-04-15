@@ -4,10 +4,10 @@ FROM node:18-alpine AS dependencies
 WORKDIR /app
 
 # Copy package files first for layer caching
-COPY package.json package-lock.json* ./
+COPY app/package.json app/package-lock.json ./
 
 # Install production dependencies only
-RUN npm ci --only=production && \
+RUN npm ci --omit=dev && \
     npm cache clean --force
 
 # Stage 2 — Production image
