@@ -90,6 +90,8 @@ standard used at Stripe, Monzo, and Cloudflare.
 ---
 
 ## Pipeline Architecture
+
+```text
 git push to main
 │
 ▼
@@ -143,6 +145,7 @@ git push to main
 │  Posts scan results table to PR comments           │
 │  Full visibility for every engineer on the team    │
 └─────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -215,6 +218,8 @@ tested — not a locally built version that might differ.
 ---
 
 ## Project Structure
+
+```text
 aws-devsecops-pipeline/
 │
 ├── .github/
@@ -240,6 +245,7 @@ aws-devsecops-pipeline/
 │
 ├── .gitignore
 └── README.md
+```
 
 ---
 
@@ -266,12 +272,16 @@ terraform output github_secrets_to_set
 ```
 
 ### Step 2 — Add GitHub Secrets
-Settings → Secrets and variables → Actions → New repository secret
-AWS_ROLE_ARN     = [from terraform output]
-ECR_REGISTRY     = [account_id].dkr.ecr.us-east-1.amazonaws.com
-ECR_REPOSITORY   = devops-demo-app
-SNYK_TOKEN       = [from snyk.io account settings]
+
+Go to `Settings -> Secrets and variables -> Actions -> New repository secret`
+
+```text
+AWS_ROLE_ARN      = [from terraform output]
+ECR_REGISTRY      = [account_id].dkr.ecr.us-east-1.amazonaws.com
+ECR_REPOSITORY    = devops-demo-app
+SNYK_TOKEN        = [from snyk.io account settings]
 SEMGREP_APP_TOKEN = [from semgrep.dev settings]
+```
 
 ### Step 3 — Push and Watch Pipeline Run
 
